@@ -50,6 +50,8 @@ services:
       - OLLAMA_URL=http://host.docker.internal:11434
       # Tell the app we're on macOS so it uses correct GPU detection
       - NOMAD_PLATFORM=darwin
+      # Storage path for container bind mounts (must be Docker-accessible)
+      - NOMAD_STORAGE_PATH=/Users/Shared/project-nomad/storage
     depends_on:
       mysql:
         condition: service_healthy

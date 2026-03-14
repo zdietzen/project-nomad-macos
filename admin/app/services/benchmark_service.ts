@@ -23,10 +23,14 @@ import type {
   RepositoryStats,
 } from '../../types/benchmark.js'
 import { randomUUID, createHmac } from 'node:crypto'
+import { exec } from 'node:child_process'
+import { promisify } from 'node:util'
 import { DockerService } from './docker_service.js'
 import { SERVICE_NAMES } from '../../constants/service_names.js'
 import { BROADCAST_CHANNELS } from '../../constants/broadcast.js'
 import Dockerode from 'dockerode'
+
+const execAsync = promisify(exec)
 
 // HMAC secret for signing submissions to the benchmark repository
 // This provides basic protection against casual API abuse.
@@ -277,8 +281,22 @@ export class BenchmarkService {
         gpuModel = discreteGpu?.model || graphics.controllers[0]?.model || null
       }
 
-      // Fallback: Check Docker for nvidia runtime and query GPU model via nvidia-smi
-      if (!gpuModel) {
+      // Apple Silicon: systeminformation returns Apple GPU in controllers on macOS
+      if (!gpuModel && (process.platform === 'darwin' || process.env.NOMAD_PLATFORM === 'darwin')) {
+        const appleGpu = graphics.controllers.find(
+          (g) => g.vendor?.toLowerCase().includes('apple') || g.model?.toLowerCase().includes('apple')
+        )
+        if (appleGpu) {
+          gpuModel = appleGpu.model || 'Apple Silicon (Metal)'
+        } else {
+          // M-series chips always have Metal GPU — report it even if si doesn't detect it
+          gpuModel = 'Apple Silicon (Metal)'
+        }
+        logger.info(`[BenchmarkService] Apple Silicon GPU detected: ${gpuModel}`)
+      }
+
+      // Fallback: Check Docker for nvidia runtime and query GPU model via nvidia-smi (Linux only)
+      if (!gpuModel && process.platform !== 'darwin' && process.env.NOMAD_PLATFORM !== 'darwin') {
         try {
           const dockerInfo = await this.dockerService.docker.info()
           const runtimes = dockerInfo.Runtimes || {}
@@ -412,26 +430,32 @@ export class BenchmarkService {
   }
 
   /**
-   * Run system benchmarks using sysbench in Docker
+   * Run system benchmarks using sysbench.
+   * On macOS: uses native sysbench installed via `brew install sysbench`.
+   * On Linux: uses sysbench in a Docker container.
    */
   private async _runSystemBenchmarks(): Promise<SystemScores> {
-    // Ensure sysbench image is available
-    await this._ensureSysbenchImage()
+    const isMacOS = process.platform === 'darwin' || process.env.NOMAD_PLATFORM === 'darwin'
+
+    if (!isMacOS) {
+      // Ensure sysbench Docker image is available (Linux only)
+      await this._ensureSysbenchImage()
+    }
 
     // Run CPU benchmark
     this._updateStatus('running_cpu', 'Running CPU benchmark...')
-    const cpuResult = await this._runSysbenchCpu()
+    const cpuResult = await this._runSysbenchCpu(isMacOS)
 
     // Run memory benchmark
     this._updateStatus('running_memory', 'Running memory benchmark...')
-    const memoryResult = await this._runSysbenchMemory()
+    const memoryResult = await this._runSysbenchMemory(isMacOS)
 
     // Run disk benchmarks
     this._updateStatus('running_disk_read', 'Running disk read benchmark...')
-    const diskReadResult = await this._runSysbenchDiskRead()
+    const diskReadResult = await this._runSysbenchDiskRead(isMacOS)
 
     this._updateStatus('running_disk_write', 'Running disk write benchmark...')
-    const diskWriteResult = await this._runSysbenchDiskWrite()
+    const diskWriteResult = await this._runSysbenchDiskWrite(isMacOS)
 
     // Normalize scores to 0-100 scale
     return {
@@ -605,15 +629,11 @@ export class BenchmarkService {
   /**
    * Run sysbench CPU benchmark
    */
-  private async _runSysbenchCpu(): Promise<SysbenchCpuResult> {
-    const output = await this._runSysbenchCommand([
-      'sysbench',
-      'cpu',
-      '--cpu-max-prime=20000',
-      '--threads=4',
-      '--time=30',
-      'run',
-    ])
+  private async _runSysbenchCpu(nativeMode = false): Promise<SysbenchCpuResult> {
+    const cmd = ['sysbench', 'cpu', '--cpu-max-prime=20000', '--threads=4', '--time=30', 'run']
+    const output = nativeMode
+      ? await this._runSysbenchCommandNative(cmd)
+      : await this._runSysbenchCommand(cmd)
 
     // Parse output for events per second
     const eventsMatch = output.match(/events per second:\s*([\d.]+)/i)
@@ -630,15 +650,11 @@ export class BenchmarkService {
   /**
    * Run sysbench memory benchmark
    */
-  private async _runSysbenchMemory(): Promise<SysbenchMemoryResult> {
-    const output = await this._runSysbenchCommand([
-      'sysbench',
-      'memory',
-      '--memory-block-size=1K',
-      '--memory-total-size=10G',
-      '--threads=4',
-      'run',
-    ])
+  private async _runSysbenchMemory(nativeMode = false): Promise<SysbenchMemoryResult> {
+    const cmd = ['sysbench', 'memory', '--memory-block-size=1K', '--memory-total-size=10G', '--threads=4', 'run']
+    const output = nativeMode
+      ? await this._runSysbenchCommandNative(cmd)
+      : await this._runSysbenchCommand(cmd)
 
     // Parse output
     const opsMatch = output.match(/Total operations:\s*\d+\s*\(([\d.]+)\s*per second\)/i)
@@ -655,16 +671,17 @@ export class BenchmarkService {
   /**
    * Run sysbench disk read benchmark
    */
-  private async _runSysbenchDiskRead(): Promise<SysbenchDiskResult> {
-    // Run prepare, test, and cleanup in a single container
-    // This is necessary because each container has its own filesystem
-    const output = await this._runSysbenchCommand([
-      'sh',
-      '-c',
+  private async _runSysbenchDiskRead(nativeMode = false): Promise<SysbenchDiskResult> {
+    const shellCmd = [
+      'sh', '-c',
       'sysbench fileio --file-total-size=1G --file-num=4 prepare && ' +
         'sysbench fileio --file-total-size=1G --file-num=4 --file-test-mode=seqrd --time=30 run && ' +
         'sysbench fileio --file-total-size=1G --file-num=4 cleanup',
-    ])
+    ]
+    // Run prepare, test, and cleanup in a single operation
+    const output = nativeMode
+      ? await this._runSysbenchCommandNative(shellCmd)
+      : await this._runSysbenchCommand(shellCmd)
 
     // Parse output - look for the Throughput section
     const readMatch = output.match(/read,\s*MiB\/s:\s*([\d.]+)/i)
@@ -684,16 +701,16 @@ export class BenchmarkService {
   /**
    * Run sysbench disk write benchmark
    */
-  private async _runSysbenchDiskWrite(): Promise<SysbenchDiskResult> {
-    // Run prepare, test, and cleanup in a single container
-    // This is necessary because each container has its own filesystem
-    const output = await this._runSysbenchCommand([
-      'sh',
-      '-c',
+  private async _runSysbenchDiskWrite(nativeMode = false): Promise<SysbenchDiskResult> {
+    const shellCmd = [
+      'sh', '-c',
       'sysbench fileio --file-total-size=1G --file-num=4 prepare && ' +
         'sysbench fileio --file-total-size=1G --file-num=4 --file-test-mode=seqwr --time=30 run && ' +
         'sysbench fileio --file-total-size=1G --file-num=4 cleanup',
-    ])
+    ]
+    const output = nativeMode
+      ? await this._runSysbenchCommandNative(shellCmd)
+      : await this._runSysbenchCommand(shellCmd)
 
     // Parse output - look for the Throughput section
     const writeMatch = output.match(/written,\s*MiB\/s:\s*([\d.]+)/i)
@@ -707,6 +724,49 @@ export class BenchmarkService {
       read_mb_per_sec: 0,
       write_mb_per_sec: writeMatch ? parseFloat(writeMatch[1]) : 0,
       total_time: 30,
+    }
+  }
+
+  /**
+   * Run a sysbench command natively on macOS (installed via `brew install sysbench`).
+   * The command array is joined into a shell command string.
+   */
+  private async _runSysbenchCommandNative(cmd: string[]): Promise<string> {
+    // Find sysbench binary — Homebrew installs it to /opt/homebrew/bin on Apple Silicon
+    const sysbenchPaths = ['/opt/homebrew/bin/sysbench', '/usr/local/bin/sysbench', 'sysbench']
+    let sysbenchBin = 'sysbench'
+    for (const p of sysbenchPaths) {
+      try {
+        await execAsync(`test -x "${p}"`)
+        sysbenchBin = p
+        break
+      } catch {
+        // try next
+      }
+    }
+
+    // Build the shell command, substituting the detected binary
+    const shellCommand = cmd
+      .join(' ')
+      .replace(/^sysbench/, sysbenchBin)
+      .replace(/^sh -c /, '') // unwrap `sh -c` since execAsync runs in a shell
+
+    // For compound commands (sh -c '...'), run as-is via shell
+    const isSh = cmd[0] === 'sh'
+    const finalCommand = isSh
+      ? cmd.slice(2).join(' ').replace(/sysbench/g, sysbenchBin)
+      : `${sysbenchBin} ${cmd.slice(1).join(' ')}`
+
+    try {
+      const { stdout, stderr } = await execAsync(finalCommand, { timeout: 120000 })
+      return stdout + stderr
+    } catch (error: any) {
+      // execAsync throws on non-zero exit but stdout still has useful output
+      const output = (error.stdout || '') + (error.stderr || '')
+      if (output.includes('events per second') || output.includes('Total operations') || output.includes('MiB/s')) {
+        return output
+      }
+      throw new Error(`Native sysbench failed: ${error.message}. Install with: brew install sysbench`)
     }
   }
 

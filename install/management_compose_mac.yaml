@@ -1,0 +1,132 @@
+# =============================================================================
+# Project N.O.M.A.D. — macOS Apple Silicon Docker Compose
+#
+# Key differences from management_compose.yaml:
+#   - All services use platform: linux/arm64 (native ARM64 images)
+#   - Ollama is NOT here — it runs natively via `brew services start ollama`
+#     giving full Apple Silicon Metal GPU acceleration
+#   - OLLAMA_URL points to host.docker.internal:11434 (native Ollama)
+#   - Qdrant added here (vector DB for AI, was managed separately)
+#   - restart: "no" — lifecycle controlled by the menu bar app
+#   - No nomad-update-shared volume (updater sidecar not used on Mac)
+# =============================================================================
+name: project-nomad
+
+services:
+
+  # ── Admin (Command Center UI + API) ────────────────────────────────────────
+  admin:
+    image: ghcr.io/crosstalk-solutions/project-nomad:latest
+    # No platform: linux/arm64 — upstream image is AMD64-only; Docker Desktop
+    # runs it via Rosetta 2 on Apple Silicon automatically.
+    pull_policy: always
+    container_name: nomad_admin
+    restart: "no"  # Controlled by the NOMAD menu bar app
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "8080:8080"
+    volumes:
+      - /Users/Shared/project-nomad/storage:/app/storage
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /Users/Shared/project-nomad/entrypoint.sh:/usr/local/bin/entrypoint.sh
+    environment:
+      - NODE_ENV=production
+      - PORT=8080
+      - LOG_LEVEL=info
+      - APP_KEY=replaceme
+      - HOST=0.0.0.0
+      - URL=replaceme
+      - DB_HOST=mysql
+      - DB_PORT=3306
+      - DB_DATABASE=nomad
+      - DB_USER=nomad_user
+      - DB_PASSWORD=replaceme
+      - DB_NAME=nomad
+      - DB_SSL=false
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      # Ollama runs natively on macOS for full Metal GPU acceleration
+      - OLLAMA_URL=http://host.docker.internal:11434
+      # Tell the app we're on macOS so it uses correct GPU detection
+      - NOMAD_PLATFORM=darwin
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    entrypoint: ["/usr/local/bin/entrypoint.sh"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ── Log Viewer ─────────────────────────────────────────────────────────────
+  dozzle:
+    image: amir20/dozzle:v10.0
+    platform: linux/arm64
+    container_name: nomad_dozzle
+    restart: "no"
+    ports:
+      - "9999:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - DOZZLE_ENABLE_ACTIONS=true
+      - DOZZLE_ENABLE_SHELL=true
+
+  # ── Database ───────────────────────────────────────────────────────────────
+  mysql:
+    image: mysql:8.0
+    platform: linux/arm64
+    container_name: nomad_mysql
+    restart: "no"
+    ports:
+      - "3306:3306"
+    environment:
+      - MYSQL_ROOT_PASSWORD=replaceme
+      - MYSQL_DATABASE=nomad
+      - MYSQL_USER=nomad_user
+      - MYSQL_PASSWORD=replaceme
+    volumes:
+      - /Users/Shared/project-nomad/storage/mysql:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ── Cache ──────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    platform: linux/arm64
+    container_name: nomad_redis
+    restart: "no"
+    ports:
+      - "6379:6379"
+    volumes:
+      - /Users/Shared/project-nomad/storage/redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ── Vector Database (for AI/RAG) ───────────────────────────────────────────
+  # Qdrant is managed here since it's a support service for native Ollama
+  qdrant:
+    image: qdrant/qdrant:v1.16
+    platform: linux/arm64
+    container_name: nomad_qdrant
+    restart: "no"
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - /Users/Shared/project-nomad/storage/qdrant:/qdrant/storage
+
+  # NOTE: Ollama is intentionally absent from this file.
+  # On macOS, run: brew services start ollama
+  # This gives full Apple Silicon Metal GPU acceleration with no virtualization overhead.
+  # Ollama is accessible to all containers via host.docker.internal:11434

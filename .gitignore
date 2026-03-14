@@ -36,6 +36,13 @@ server/temp
 .vscode
 .idea
 
+# Claude Code session files
+.claude/
+
+# Swift Package Manager build artifacts
+mac-app/.build/
+mac-app/.swiftpm/
+
 # Frontend assets compiled code
 admin/public/assets
 

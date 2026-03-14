@@ -3,11 +3,15 @@
 set -e
 
 echo "Starting entrypoint script..."
-echo "Running wait-for-it.sh to ensure MySQL is ready..."
+echo "Waiting for MySQL to be ready..."
 
-# Use wait-for-it.sh to wait for MySQL to be available
-# wait-for-it.sh <host>:<port> [-t timeout] [-- command args]
-/usr/local/bin/wait-for-it.sh ${DB_HOST}:${DB_PORT} -t 60 -- echo "MySQL is up and running!"
+# depends_on: condition: service_healthy guarantees MySQL is up before this runs.
+# If wait-for-it.sh is baked into the image, use it; otherwise skip (MySQL is healthy).
+if [ -x /usr/local/bin/wait-for-it.sh ]; then
+  /usr/local/bin/wait-for-it.sh ${DB_HOST}:${DB_PORT} -t 60 -- echo "MySQL is up and running!"
+else
+  echo "MySQL health confirmed via Docker healthcheck."
+fi
 
 # Run AdonisJS migrations
 echo "Running AdonisJS migrations..."

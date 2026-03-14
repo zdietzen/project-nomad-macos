@@ -20,13 +20,14 @@ export class DockerService {
   public static NOMAD_NETWORK = 'project-nomad_default'
 
   constructor() {
-    // Support both Linux (production) and Windows (development with Docker Desktop)
+    // Support Linux (production), macOS (Docker Desktop), and Windows (Docker Desktop)
+    // macOS Docker Desktop exposes the same Unix socket path as Linux via a symlink.
     const isWindows = process.platform === 'win32'
     if (isWindows) {
       // Windows Docker Desktop uses named pipe
       this.docker = new Docker({ socketPath: '//./pipe/docker_engine' })
     } else {
-      // Linux uses Unix socket
+      // Linux and macOS both use the Unix socket (Docker Desktop on Mac symlinks it)
       this.docker = new Docker({ socketPath: '/var/run/docker.sock' })
     }
   }
@@ -474,6 +475,22 @@ export class DockerService {
               },
             ],
           }
+        } else if (gpuResult.type === 'apple_silicon') {
+          this._broadcast(
+            service.service_name,
+            'gpu-config',
+            `Apple Silicon detected. Ollama runs natively on macOS with full Metal GPU acceleration — no Docker container needed. Using native Ollama at ${process.env.OLLAMA_URL || 'http://localhost:11434'}.`
+          )
+          logger.info('[DockerService] Apple Silicon: Ollama is running natively with Metal GPU. Skipping Docker container creation.')
+          // On macOS, Ollama is installed via `brew install ollama` and managed by the menu bar app.
+          // The admin app talks to native Ollama via OLLAMA_URL=http://host.docker.internal:11434.
+          // We still mark the service as installed so the UI reflects it correctly.
+          service.installed = true
+          service.installation_status = 'idle'
+          await service.save()
+          this.activeInstallations.delete(service.service_name)
+          this._broadcast(service.service_name, 'completed', 'Native Ollama (Metal GPU) registered successfully.')
+          return
         } else if (gpuResult.type === 'amd') {
           this._broadcast(
             service.service_name,
@@ -681,9 +698,10 @@ export class DockerService {
   /**
    * Detect GPU type and toolkit availability.
    * Primary: Check Docker runtimes via docker.info() (works from inside containers).
-   * Fallback: lspci for host-based installs and AMD detection.
+   * macOS: Detect Apple Silicon Metal GPU via system_profiler (lspci not available on macOS).
+   * Fallback: lspci for host-based Linux installs and AMD detection.
    */
-  private async _detectGPUType(): Promise<{ type: 'nvidia' | 'amd' | 'none'; toolkitMissing?: boolean }> {
+  private async _detectGPUType(): Promise<{ type: 'nvidia' | 'amd' | 'apple_silicon' | 'none'; toolkitMissing?: boolean }> {
     try {
       // Primary: Check Docker daemon for nvidia runtime (works from inside containers)
       try {
@@ -697,8 +715,26 @@ export class DockerService {
         logger.warn(`[DockerService] Could not query Docker info for GPU runtimes: ${error.message}`)
       }
 
-      // Fallback: lspci for host-based installs (not available inside Docker)
       const execAsync = promisify(exec)
+
+      // macOS (Apple Silicon): lspci does not exist — use system_profiler instead
+      if (process.platform === 'darwin') {
+        try {
+          const { stdout: metalCheck } = await execAsync(
+            'system_profiler SPDisplaysDataType 2>/dev/null | grep -i "metal" || true'
+          )
+          if (metalCheck.toLowerCase().includes('metal')) {
+            logger.info('[DockerService] Apple Silicon Metal GPU detected via system_profiler')
+            return { type: 'apple_silicon' }
+          }
+        } catch (error) {
+          logger.warn(`[DockerService] Could not query system_profiler for GPU info: ${error.message}`)
+        }
+        logger.info('[DockerService] macOS detected but no Metal GPU found')
+        return { type: 'none' }
+      }
+
+      // Fallback: lspci for host-based Linux installs (not available inside Docker)
 
       // Check for NVIDIA GPU via lspci
       try {

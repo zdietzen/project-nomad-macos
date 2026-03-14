@@ -68,6 +68,9 @@ export default class ServiceSeeder extends BaseSeeder {
       friendly_name: 'AI Assistant',
       powered_by: 'Ollama',
       display_order: 3,
+      // On macOS (Apple Silicon), Ollama runs natively via `brew install ollama` for full
+      // Metal GPU acceleration. The install button registers native Ollama instead of
+      // creating a Docker container. See DockerService._detectGPUType for apple_silicon handling.
       description: 'Local AI chat that runs entirely on your hardware - no internet required',
       icon: 'IconWand',
       container_image: 'ollama/ollama:0.15.2',
@@ -140,6 +143,9 @@ export default class ServiceSeeder extends BaseSeeder {
       friendly_name: 'Education Platform',
       powered_by: 'Kolibri',
       display_order: 2,
+      // Note: treehouses/kolibri:0.12.8 is an AMD64-only image.
+      // On Apple Silicon (macOS), Docker Desktop runs it via Rosetta 2 emulation — functional
+      // but with reduced performance. A native ARM64 Kolibri image is tracked upstream.
       description: 'Interactive learning platform with video courses and exercises',
       icon: 'IconSchool',
       container_image: 'treehouses/kolibri:0.12.8',

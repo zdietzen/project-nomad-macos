@@ -24,6 +24,9 @@ services:
     restart: "no"  # Controlled by the NOMAD menu bar app
     extra_hosts:
       - "host.docker.internal:host-gateway"
+      # Map nomad_ollama → host machine so the app's Docker-style service URL
+      # (http://nomad_ollama:11434) reaches native Ollama — no container needed.
+      - "nomad_ollama:host-gateway"
     ports:
       - "8080:8080"
     volumes:
@@ -33,6 +36,9 @@ services:
     environment:
       - NODE_ENV=production
       - PORT=8080
+      # Force IPv4 DNS preference — Docker Desktop exposes host via both IPv4/IPv6
+      # but Ollama only listens on IPv4, so Node.js must prefer IPv4 for nomad_ollama
+      - NODE_OPTIONS=--dns-result-order=ipv4first
       - LOG_LEVEL=info
       - APP_KEY=replaceme
       - HOST=0.0.0.0

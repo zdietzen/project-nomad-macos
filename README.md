@@ -29,8 +29,8 @@ Project N.O.M.A.D. is a self-contained, offline-first knowledge and education se
 > **Requirements:** macOS 13+ (Ventura), Apple Silicon (M1/M2/M3/M4), Homebrew
 
 ```bash
-git clone https://github.com/dietzendev/project-nomad.git
-cd project-nomad
+git clone https://github.com/zdietzen/project-nomad-macos.git
+cd project-nomad-macos
 bash install/install_nomad_mac.sh
 ```
 
